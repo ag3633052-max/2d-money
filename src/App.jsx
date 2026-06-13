@@ -1,10 +1,10 @@
 import ErrorBoundary from './ErrorBoundary.jsx';
-import CardField from './CardField.jsx';
+import GallifreyanOS from './GallifreyanOS.jsx';
 
 export default function App() {
   return (
     <ErrorBoundary>
-      <CardField />
+      <GallifreyanOS />
     </ErrorBoundary>
   );
 }

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import SocialPanel from './SocialPanel.jsx';
 
 const initialCards = [
   { id: "A1", x: 80, y: 80, base: 5, balance: 5, xp: 0, potential: 1.2, resilience: 1.0, variables: [], ancestral: [], stallCount: 0, links: ["B2"], history: [], tags: [] },
@@ -131,8 +132,8 @@ function Card({ card, onDrag, onSelect, selected, cipher }) {
   const wobbleX = getUiShift(card.balance + (card.xp || 0) + card.links.length * 3, 5);
   const wobbleY = getUiShift((card.xp || 0) * 2 + card.links.length * 4, 5);
 
-  return (
-    <g transform={`translate(${card.x + wobbleX}, ${card.y + wobbleY})`} onMouseDown={handleMouseDown} onClick={() => onSelect(card.id)} style={{ cursor: "grab" }}>
+    return (
+    <g transform={`translate(${card.x + wobbleX}, ${card.y + wobbleY})`} onMouseDown={handleMouseDown} onClick={(e) => onSelect(card.id, e.ctrlKey || e.metaKey)} style={{ cursor: "grab" }}>
       <rect width="130" height="96" rx="10" fill={selected ? "#1e3a8a" : "#0b1220"} stroke={selected ? "#60a5fa" : "#6b7280"} />
       <text x="10" y="18" fill="white" fontSize="13">{card.id}</text>
       <text x="10" y="30" fill="#60a5fa" fontSize="10">rank:{getRank(card)}</text>
@@ -157,18 +158,110 @@ export default function CardField() {
   const current = branches.find(b => b.id === currentBranch) || branches[0];
 
   const [draft, setDraft] = useState(current.cards);
-  const [selectedId, setSelectedId] = useState(current.cards[0]?.id || null);
+  const [selectedIds, setSelectedIds] = useState(() => (current.cards[0] ? [current.cards[0].id] : []));
+  const [privacyMode, setPrivacyMode] = useState(false);
+  const [publicSave, setPublicSave] = useState(true);
+  const [multiverseStatus, setMultiverseStatus] = useState('idle');
+  const [multiverseSavedAt, setMultiverseSavedAt] = useState(null);
   const pendingRef = useRef([]);
   const errorRef = useRef([]);
 
   useEffect(() => {
     setDraft(current.cards);
-    setSelectedId(current.cards[0]?.id || null);
+    setSelectedIds(current.cards[0] ? [current.cards[0].id] : []);
   }, [currentBranch]);
 
   useEffect(() => {
-    localStorage.setItem("card_branches", JSON.stringify(branches));
-  }, [branches]);
+    if (!privacyMode || publicSave) {
+      localStorage.setItem("card_branches", JSON.stringify(branches));
+    }
+  }, [branches, privacyMode, publicSave]);
+
+  // Load anonymized snapshot from URL fragment if present
+  useEffect(() => {
+    try {
+      const hash = location.hash || '';
+      if (hash.startsWith('#anon=')) {
+        const payload = decodeURIComponent(hash.slice(6));
+        const json = JSON.parse(atob(payload));
+        if (json && Array.isArray(json.cards)) {
+          setDraft(json.cards);
+          setPrivacyMode(true);
+          setSelectedIds(json.cards[0] ? [json.cards[0].id] : []);
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
+  }, []);
+
+  function obfuscateId(id) {
+    // lightweight deterministic obfuscation
+    let h = 2166136261 >>> 0;
+    for (let i = 0; i < id.length; i++) {
+      h = Math.imul(h ^ id.charCodeAt(i), 16777619) >>> 0;
+    }
+    return ('V' + (h >>> 0).toString(36).toUpperCase()).slice(0, 6);
+  }
+
+  function anonymizeCards(cards) {
+    const idMap = {};
+    cards.forEach(c => { idMap[c.id] = obfuscateId(c.id); });
+    return cards.map(c => ({
+      id: idMap[c.id],
+      x: Math.round(c.x),
+      y: Math.round(c.y),
+      base: Math.round(c.base),
+      balance: Number((Math.max(0, c.balance) * (0.9 + Math.random() * 0.2)).toFixed(2)),
+      xp: Math.round((c.xp || 0) * (0.9 + Math.random() * 0.2)),
+      potential: Number(((c.potential || 0) * (0.9 + Math.random() * 0.2)).toFixed(2)),
+      resilience: Number(((c.resilience || 0) * (0.9 + Math.random() * 0.2)).toFixed(2)),
+      links: (c.links || []).map(l => idMap[l]).filter(Boolean),
+      tags: (c.tags || []).map(t => (t ? (t[0] ? '*' : '*') : '*')),
+    }));
+  }
+
+  const MULTIVERSE_KEY = 'card_multiverse_snapshot_v1';
+
+  function serializeMultiverse() {
+    return JSON.stringify({ branches, currentBranch, draft, selectedIds, timestamp: Date.now() });
+  }
+
+  function saveMultiverse() {
+    try {
+      localStorage.setItem(MULTIVERSE_KEY, serializeMultiverse());
+      setMultiverseSavedAt(Date.now());
+      setMultiverseStatus('saved');
+    } catch (e) {
+      setMultiverseStatus('error');
+    }
+  }
+
+  function loadMultiverse() {
+    try {
+      const raw = localStorage.getItem(MULTIVERSE_KEY);
+      if (!raw) {
+        setMultiverseStatus('none');
+        return;
+      }
+      const json = JSON.parse(raw);
+      if (json?.branches && Array.isArray(json.branches)) {
+        setBranches(json.branches);
+        setCurrentBranch(json.currentBranch || json.branches[0]?.id || 'root');
+        setDraft(json.draft || json.branches[0]?.cards || current.cards);
+        setSelectedIds(json.selectedIds?.length ? json.selectedIds : [json.draft?.[0]?.id || current.cards[0]?.id]);
+        setMultiverseStatus('loaded');
+      }
+    } catch (e) {
+      setMultiverseStatus('error');
+    }
+  }
+
+  function makeAnonSnapshotUrl() {
+    const cards = anonymizeCards(draft);
+    const payload = btoa(JSON.stringify({ cards }));
+    return `${location.origin}${location.pathname}#anon=${encodeURIComponent(payload)}`;
+  }
 
   function handleError(error, context, nodes) {
     const entry = {
@@ -197,6 +290,16 @@ export default function CardField() {
   useEffect(() => {
     const onKey = (e) => {
       const key = e.key.toLowerCase();
+      if ((e.ctrlKey || e.metaKey) && key === 's') {
+        e.preventDefault();
+        saveMultiverse();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && key === 'v') {
+        e.preventDefault();
+        loadMultiverse();
+        return;
+      }
 
       setDraft(prev => {
         try {
@@ -241,7 +344,42 @@ export default function CardField() {
   }, []);
 
   const hash = useMemo(() => hashState(draft), [draft]);
-  const selected = draft.find(c => c.id === selectedId) || draft[0];
+  const selectedList = draft.filter(c => selectedIds.includes(c.id));
+  const selected = selectedList[0] || draft[0];
+
+  // Manual controls for selected leaders
+  const [manual, setManual] = useState({
+    balance: selected?.balance ?? 0,
+    xp: selected?.xp ?? 0,
+    potential: selected?.potential ?? 0,
+    resilience: selected?.resilience ?? 0,
+    base: selected?.base ?? 1
+  });
+
+  useEffect(() => {
+    setManual({
+      balance: selected?.balance ?? 0,
+      xp: selected?.xp ?? 0,
+      potential: selected?.potential ?? 0,
+      resilience: selected?.resilience ?? 0,
+      base: selected?.base ?? 1
+    });
+  }, [selectedIds, selected]);
+
+  const applyManualToSelected = (mode = 'set') => {
+    setDraft(prev => prev.map(c => {
+      if (!selectedIds.includes(c.id)) return c;
+      const updated = { ...c };
+      if (mode === 'set') {
+        updated.balance = Number(manual.balance) || 0;
+        updated.xp = Number(manual.xp) || 0;
+        updated.potential = Number(manual.potential) || 0;
+        updated.resilience = Number(manual.resilience) || 0;
+        updated.base = Number(manual.base) || 1;
+      }
+      return updated;
+    }));
+  };
   const totalXp = useMemo(() => draft.reduce((sum, c) => sum + (c.xp || 0), 0), [draft]);
   const totalBalance = useMemo(() => draft.reduce((sum, c) => sum + c.balance, 0), [draft]);
   const topOffsetX = getUiShift(totalXp + totalBalance, 18);
@@ -340,54 +478,68 @@ export default function CardField() {
     setDraft(prev => prev.map(c => c.id === id ? { ...c, x, y } : c));
   };
 
+  const handleSelect = (id, append = false) => {
+    setSelectedIds(prev => {
+      if (!append) return [id];
+      if (prev.includes(id)) return prev.filter(x => x !== id);
+      return [...prev, id];
+    });
+  };
+
   const recruitMember = () => {
     if (!selected) return;
-    const newId = "R" + Math.random().toString(36).slice(2, 6).toUpperCase();
-    const child = {
-      id: newId,
-      x: selected.x + 140,
-      y: selected.y + 20,
-      base: Math.max(1, Math.floor(selected.base * 0.75)),
-      balance: Math.max(0.4, selected.potential * selected.base * 0.25),
-      xp: 0,
-      potential: Math.max(0.4, selected.potential * 0.8),
-      resilience: Math.max(0.4, selected.resilience * 0.8),
-      variables: [],
-      links: [selected.id],
-      history: [`recruited by ${selected.id}`],
-      tags: [],
-      ancestral: [...(selected.ancestral || []), { time: Date.now(), event: 'recruit', state: { balance: selected.balance, xp: selected.xp, potential: selected.potential } }],
-      stallCount: 0
-    };
-    setDraft(prev => [...prev, child]);
+    const newChildren = selectedIds.map(id => {
+      const src = draft.find(c => c.id === id) || selected;
+      const newId = "R" + Math.random().toString(36).slice(2, 6).toUpperCase();
+      return {
+        id: newId,
+        x: src.x + 140 + (Math.random() - 0.5) * 40,
+        y: src.y + 20 + (Math.random() - 0.5) * 40,
+        base: Math.max(1, Math.floor((src.base || 1) * 0.75)),
+        balance: Math.max(0.4, (src.potential || 0.5) * (src.base || 1) * 0.25),
+        xp: 0,
+        potential: Math.max(0.4, (src.potential || 0.5) * 0.8),
+        resilience: Math.max(0.4, (src.resilience || 0.5) * 0.8),
+        variables: [],
+        links: [src.id],
+        history: [`recruited by ${src.id}`],
+        tags: [],
+        ancestral: [...(src.ancestral || []), { time: Date.now(), event: 'recruit', state: { balance: src.balance, xp: src.xp, potential: src.potential } }],
+        stallCount: 0
+      };
+    });
+    setDraft(prev => [...prev, ...newChildren]);
   };
 
   const trainMember = () => {
-    if (!selected) return;
-    setDraft(prev => prev.map(c => c.id === selected.id ? {
+    if (!selectedIds.length) return;
+    setDraft(prev => prev.map(c => selectedIds.includes(c.id) ? {
       ...c,
       xp: (c.xp || 0) + 3,
-      balance: c.balance + Math.max(0.5, c.base * 0.2) + c.potential * 0.1,
-      potential: c.potential + 0.08,
-      resilience: Math.min(3, c.resilience + 0.05),
-      history: [...c.history, `trained`]
+      balance: c.balance + Math.max(0.5, (c.base || 1) * 0.2) + (c.potential || 0) * 0.1,
+      potential: (c.potential || 0) + 0.08,
+      resilience: Math.min(5, (c.resilience || 0) + 0.05),
+      history: [...(c.history || []), `trained`]
     } : c));
   };
 
   const promoteMember = () => {
-    if (!selected) return;
+    if (!selectedIds.length) return;
     const cost = 12;
-    if ((selected.xp || 0) < cost) return;
-    setDraft(prev => prev.map(c => c.id === selected.id ? {
-      ...c,
-      xp: c.xp - cost,
-      base: c.base + 1,
-      balance: c.balance + 2 + c.potential * 0.2,
-      potential: c.potential + 0.15,
-      resilience: c.resilience + 0.1,
-      history: [...c.history, `promoted`],
-      ancestral: [...(c.ancestral || []), { time: Date.now(), event: 'promote', state: { balance: c.balance, xp: c.xp, potential: c.potential } }]
-    } : c));
+    setDraft(prev => prev.map(c => {
+      if (!selectedIds.includes(c.id)) return c;
+      if ((c.xp || 0) < cost) return c;
+      return {
+        ...c,
+        xp: (c.xp || 0) - cost,
+        base: (c.base || 0) + 1,
+        balance: (c.balance || 0) + 2 + (c.potential || 0) * 0.2,
+        potential: (c.potential || 0) + 0.15,
+        resilience: (c.resilience || 0) + 0.1,
+        history: [...(c.history || []), `promoted`],
+        ancestral: [...(c.ancestral || []), { time: Date.now(), event: 'promote', state: { balance: c.balance, xp: c.xp, potential: c.potential } }]
+      };
+    }));
   };
 
   const spawnNode = (source) => {
@@ -557,6 +709,10 @@ export default function CardField() {
         <div>system: XCGHFT + FORTCLIFT ACTIVE</div>
       </div>
 
+      <div style={{ position: 'absolute', top: 12, right: 12 }}>
+        <SocialPanel youtube="https://www.youtube.com/@AndrewGarcia-o6f" facebook="https://www.facebook.com/AndyDavisStory/" privacyMode={privacyMode} />
+      </div>
+
       <div style={{ minWidth: '1200px', minHeight: '900px' }}>
         <svg style={{ width: '100%', minHeight: '900px' }}>
         {draft.map(card =>
@@ -584,7 +740,7 @@ export default function CardField() {
           }).join("");
 
           return (
-            <Card key={card.id} card={card} onDrag={moveCard} onSelect={setSelectedId} selected={card.id === selectedId} cipher={cipher} />
+            <Card key={card.id} card={card} onDrag={moveCard} onSelect={handleSelect} selected={selectedIds.includes(card.id)} cipher={cipher} />
           );
         })}
       </svg>
@@ -594,24 +750,53 @@ export default function CardField() {
         <button className="px-2 py-1 bg-gray-800" onClick={commit}>commit branch</button>
         <button className="px-2 py-1 bg-gray-800" onClick={tick}>tick $ + delayed spawn zone</button>
         <button className="px-2 py-1 bg-gray-800" onClick={() => setCurrentBranch(current.parent || "root")}>revert</button>
+        <button className="px-2 py-1 bg-gray-800" onClick={() => { setPrivacyMode(p => !p); }}>{privacyMode ? 'Privacy ON' : 'Privacy OFF'}</button>
+        <button className="px-2 py-1 bg-gray-800" onClick={() => { setPublicSave(s => !s); }}>{publicSave ? 'Public Save ON' : 'Public Save OFF'}</button>
+        <button className="px-2 py-1 bg-gray-800" onClick={saveMultiverse}>Save CTRL+S</button>
+        <button className="px-2 py-1 bg-gray-800" onClick={loadMultiverse}>Load CTRL+V</button>
+        <button className="px-2 py-1 bg-gray-800" onClick={() => {
+          const url = makeAnonSnapshotUrl();
+          navigator.clipboard?.writeText(url).catch(() => {});
+          alert('Anonymized snapshot URL copied to clipboard');
+        }}>Share anonymized snapshot</button>
+        <span style={{ color: '#94a3b8', padding: '12px 0' }}>Multiverse: {multiverseStatus} {multiverseSavedAt ? `(saved ${new Date(multiverseSavedAt).toLocaleTimeString()})` : ''}</span>
       </div>
 
       <div style={selectedPanelStyle}>
-        <div style={{ marginBottom: '10px', color: '#fff', fontWeight: 700 }}>Selected Leader</div>
-        <div>id: {selected?.id || 'none'}</div>
+        <div style={{ marginBottom: '10px', color: '#fff', fontWeight: 700 }}>Selected Leaders ({selectedIds.length})</div>
+        <div>primary id: {selected?.id || 'none'}</div>
         <div>rank: {selected ? getRank(selected) : 'n/a'}</div>
-        <div>balance: {selected ? selected.balance.toFixed(2) : '0.00'}</div>
-        <div>xp: {selected?.xp || 0}</div>
         <div>links: {selected?.links.length || 0}</div>
         <div>variables: {selected?.variables?.length || 0}</div>
         <div>ancestors: {selected?.ancestral?.length || 0}</div>
+
+        <div style={{ marginTop: 8, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          <label style={{ fontSize: 12, color: '#94a3b8' }}>Balance
+            <input type="number" step="0.01" value={manual.balance} onChange={(e) => setManual(m => ({ ...m, balance: e.target.value }))} style={{ width: '100%' }} />
+          </label>
+          <label style={{ fontSize: 12, color: '#94a3b8' }}>XP
+            <input type="number" step="1" value={manual.xp} onChange={(e) => setManual(m => ({ ...m, xp: e.target.value }))} style={{ width: '100%' }} />
+          </label>
+          <label style={{ fontSize: 12, color: '#94a3b8' }}>Potential
+            <input type="number" step="0.01" value={manual.potential} onChange={(e) => setManual(m => ({ ...m, potential: e.target.value }))} style={{ width: '100%' }} />
+          </label>
+          <label style={{ fontSize: 12, color: '#94a3b8' }}>Resilience
+            <input type="number" step="0.01" value={manual.resilience} onChange={(e) => setManual(m => ({ ...m, resilience: e.target.value }))} style={{ width: '100%' }} />
+          </label>
+          <label style={{ fontSize: 12, color: '#94a3b8' }}>Base
+            <input type="number" step="1" value={manual.base} onChange={(e) => setManual(m => ({ ...m, base: e.target.value }))} style={{ width: '100%' }} />
+          </label>
+        </div>
+
         <div style={leaderStatsStyle}>
           <button style={trainButtonStyle} onClick={trainMember}>train</button>
           <button style={recruitButtonStyle} onClick={recruitMember}>recruit</button>
           <button style={promoteButtonStyle} onClick={promoteMember}>promote</button>
+          <button style={{ ...buttonStyle, background: '#10b981', color: '#fff' }} onClick={() => applyManualToSelected('set')}>Apply to selected</button>
         </div>
+
         <div style={{ marginTop: '10px', fontSize: '0.75rem', color: '#94a3b8' }}>
-          promote costs 12 XP; training grows XP and balance; recruit spawns a new downline member.
+          Use Ctrl/Cmd+click to multi-select. "Apply to selected" sets the manual fields across all selected leaders.
         </div>
       </div>
 
